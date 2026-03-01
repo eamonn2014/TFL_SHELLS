@@ -14,7 +14,7 @@ suppressPackageStartupMessages({
   library(gridExtra)
   library(grid)
   library(ggplot2)
-})
+})  
 
 # ---- Source external functions (MUST be functions-only files) ----
 source("plot_theme.R")              # longitudinal theme helpers
@@ -47,12 +47,22 @@ CONST <- list(
   # ),
   
   
+  # REGEX = list(
+  #   table_sheets   = "^TABLE\\s*\\d+(?:\\.\\d+)*$",
+  #   listing_sheets = "^LISTING\\s*\\d+(?:\\.\\d+)*$"
+  # ),
+  
   REGEX = list(
-    table_sheets   = "^TABLE\\s*\\d+(?:\\.\\d+)*$",
-    listing_sheets = "^LISTING\\s*\\d+(?:\\.\\d+)*$"
+    # Accept: "T 1", "T1", "TABLE 1", "TABLE1", "T 14.1.1", "TABLE 14.1.1"
+    table_sheets   = "^T(?:ABLE)?\\s*\\d+(?:\\.\\d+)*$",
+    
+    # Accept: "L 1", "L1", "LISTING 1", "LISTING1", "L 12.3", "LISTING 12.3"
+    listing_sheets = "^L(?:ISTING)?\\s*\\d+(?:\\.\\d+)*$",
+    
+    # Accept: "F_1", "FIG_1", "F 1", "FIG 1", "F1", "FIG1"
+    # (keeps underscore support for your current FIG_# convention)
+    figure_sheets  = "^F(?:IG(?:URE)?)?[_\\s]*\\d+$"
   ),
-  
-  
   
   PAGE = list(
     page_size = list(orient = "landscape", width = 11.69, height = 8.27),
@@ -697,6 +707,69 @@ read_placeholder_dict <- function(excel_path, dict_sheet = CONST$SHEETS$dict_she
   dict
 }
 
+# read_column_spec <- function(excel_path, row_sheet_name) {
+#   sheets <- readxl::excel_sheets(excel_path)
+#   
+#   norm <- function(x) {
+#     x <- tolower(trimws(x))
+#     x <- gsub("\\s+", " ", x)
+#     x
+#   }
+#   nospace <- function(x) gsub("\\s+", "", norm(x))
+#   
+#   row_nospace <- nospace(row_sheet_name)
+#   
+#   candidates <- unique(c(
+#     paste0(row_sheet_name, "__COLUMNS"),
+#     paste0(row_sheet_name, " __COLUMNS"),
+#     paste0(row_sheet_name, "_COLUMNS"),
+#     paste0(row_sheet_name, " _COLUMNS"),
+#     paste0(gsub("\\s+", "", row_sheet_name), "__COLUMNS"),
+#     paste0(gsub("\\s+", "", row_sheet_name), "_COLUMNS"),
+#     paste0(row_nospace, "__COLUMNS"),
+#     paste0(row_nospace, "_COLUMNS")
+#   ))
+#   
+#   spec_sheet <- candidates[candidates %in% sheets][1]
+#   
+#   if (is.na(spec_sheet) || !nzchar(spec_sheet)) {
+#     sheet_map <- data.frame(raw = sheets, n1 = norm(sheets), n2 = nospace(sheets), stringsAsFactors = FALSE)
+#     cand_map  <- data.frame(raw = candidates, n1 = norm(candidates), n2 = nospace(candidates), stringsAsFactors = FALSE)
+#     
+#     hit <- sheet_map$raw[sheet_map$n1 %in% cand_map$n1 | sheet_map$n2 %in% cand_map$n2][1]
+#     spec_sheet <- hit
+#   }
+#   
+#   if (is.na(spec_sheet) || !nzchar(spec_sheet)) return(NULL)
+#   
+#   cs <- readxl::read_xlsx(excel_path, sheet = spec_sheet)
+#   names(cs) <- tolower(trimws(names(cs)))
+#   
+#   req  <- c("col_key", "level2")
+#   miss <- setdiff(req, names(cs))
+#   if (length(miss)) stop("ColumnSpec sheet '", spec_sheet, "' missing: ", paste(miss, collapse = ", "), call. = FALSE)
+#   
+#   if (!"level1"  %in% names(cs)) cs$level1  <- ""
+#   if (!"level3"  %in% names(cs)) cs$level3  <- ""
+#   if (!"width"   %in% names(cs)) cs$width   <- NA_real_
+#   if (!"align"   %in% names(cs)) cs$align   <- ""
+#   if (!"is_stub" %in% names(cs)) cs$is_stub <- FALSE
+#   
+#   cs$col_key <- normalize_empty(cs$col_key)
+#   cs$level1  <- normalize_empty(cs$level1)
+#   cs$level2  <- normalize_empty(cs$level2)
+#   cs$level3  <- normalize_empty(cs$level3)
+#   cs$align   <- normalize_empty(cs$align)
+#   cs$is_stub <- as.logical(cs$is_stub)
+#   
+#   cs <- cs[cs$col_key != "", , drop = FALSE]
+#   if (!nrow(cs)) return(NULL)
+#   
+#   if (!any(cs$is_stub)) cs$is_stub <- cs$col_key %in% c("Description", "Description2", "Statistic")
+#   cs
+#}
+
+
 read_column_spec <- function(excel_path, row_sheet_name) {
   sheets <- readxl::excel_sheets(excel_path)
   
@@ -709,22 +782,35 @@ read_column_spec <- function(excel_path, row_sheet_name) {
   
   row_nospace <- nospace(row_sheet_name)
   
-  candidates <- unique(c(
-    paste0(row_sheet_name, "__COLUMNS"),
-    paste0(row_sheet_name, " __COLUMNS"),
-    paste0(row_sheet_name, "_COLUMNS"),
-    paste0(row_sheet_name, " _COLUMNS"),
-    paste0(gsub("\\s+", "", row_sheet_name), "__COLUMNS"),
-    paste0(gsub("\\s+", "", row_sheet_name), "_COLUMNS"),
-    paste0(row_nospace, "__COLUMNS"),
-    paste0(row_nospace, "_COLUMNS")
+  # NEW: allow short suffixes too
+  suffixes <- c("C", "COL", "COLUMNS")
+  joiners  <- c("__", " __", "_", " _")  # keep your existing join styles
+  
+  # Build candidate names like:
+  # "T 3__C", "T 3__COL", "T 3__COLUMNS", "T 3 _COLUMNS", etc.
+  base_names <- unique(c(
+    row_sheet_name,
+    gsub("\\s+", "", row_sheet_name),
+    row_nospace
   ))
+  
+  candidates <- unique(unlist(lapply(base_names, function(bn) {
+    unlist(lapply(joiners, function(jn) {
+      paste0(bn, jn, suffixes)
+    }))
+  })))
   
   spec_sheet <- candidates[candidates %in% sheets][1]
   
   if (is.na(spec_sheet) || !nzchar(spec_sheet)) {
     sheet_map <- data.frame(raw = sheets, n1 = norm(sheets), n2 = nospace(sheets), stringsAsFactors = FALSE)
-    cand_map  <- data.frame(raw = candidates, n1 = norm(candidates), n2 = nospace(candidates), stringsAsFactors = FALSE)
+    
+    cand_map  <- data.frame(
+      raw = candidates,
+      n1  = norm(candidates),
+      n2  = nospace(candidates),
+      stringsAsFactors = FALSE
+    )
     
     hit <- sheet_map$raw[sheet_map$n1 %in% cand_map$n1 | sheet_map$n2 %in% cand_map$n2][1]
     spec_sheet <- hit
@@ -758,6 +844,28 @@ read_column_spec <- function(excel_path, row_sheet_name) {
   if (!any(cs$is_stub)) cs$is_stub <- cs$col_key %in% c("Description", "Description2", "Statistic")
   cs
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 colspec_to_header_df <- function(col_spec) {
   hdr <- data.frame(
@@ -1471,8 +1579,8 @@ for (sh in row_sheets) {
 }
 
 # ---- FIGURES ----
-fig_sheets <- sheets[grepl("^FIG_\\d+$", sheets, ignore.case = TRUE)]
-
+#fig_sheets <- sheets[grepl("^FIG_\\d+$", sheets, ignore.case = TRUE)]
+fig_sheets <- sheets[grepl(CONST$REGEX$figure_sheets, sheets, ignore.case = TRUE)]
 
 # if (length(fig_sheets)) {
 #   
