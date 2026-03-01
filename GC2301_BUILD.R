@@ -14,7 +14,7 @@ suppressPackageStartupMessages({
   library(gridExtra)
   library(grid)
   library(ggplot2)
-})  
+})
 
 # ---- Source external functions (MUST be functions-only files) ----
 source("plot_theme.R")              # longitudinal theme helpers
@@ -42,16 +42,6 @@ CONST <- list(
     dict_sheet = "DICTIONARY"
   ),
   
-  # REGEX = list(
-  #   table_sheets = "^TABLE\\s*\\d+(?:\\.\\d+)*$"
-  # ),
-  
-  
-  # REGEX = list(
-  #   table_sheets   = "^TABLE\\s*\\d+(?:\\.\\d+)*$",
-  #   listing_sheets = "^LISTING\\s*\\d+(?:\\.\\d+)*$"
-  # ),
-  
   REGEX = list(
     # Accept: "T 1", "T1", "TABLE 1", "TABLE1", "T 14.1.1", "TABLE 14.1.1"
     table_sheets   = "^T(?:ABLE)?\\s*\\d+(?:\\.\\d+)*$",
@@ -60,13 +50,13 @@ CONST <- list(
     listing_sheets = "^L(?:ISTING)?\\s*\\d+(?:\\.\\d+)*$",
     
     # Accept: "F_1", "FIG_1", "F 1", "FIG 1", "F1", "FIG1"
-    # (keeps underscore support for your current FIG_# convention)
     figure_sheets  = "^F(?:IG(?:URE)?)?[_\\s]*\\d+$"
   ),
   
   PAGE = list(
     page_size = list(orient = "landscape", width = 11.69, height = 8.27),
-    margins   = list(top = 0.75, bottom = 0.75, left = 0.75, right = 0.75, header = 0.40, footer = 0.40)
+    margins   = list(top = 0.75, bottom = 0.75, left = 0.75, right = 0.75,
+                     header = 0.40, footer = 0.40)
   ),
   
   DISPLAY = list(
@@ -114,6 +104,14 @@ CONST <- list(
   
   WORD = list(
     heading1_style_id = "Heading1"
+  ),
+  
+  FIG = list(
+    width_frac       = 0.88,
+    max_width        = 9.2,
+    default_aspect   = 0.58,
+    max_height_frac  = 0.58,
+    dpi              = 300
   )
 )
 
@@ -127,19 +125,14 @@ DICT_SHEET <- CONST$SHEETS$dict_sheet
 PAGE       <- CONST$PAGE
 
 CFG <- list(
-  DISPLAY = list(
-    font_family   = CONST$DISPLAY$font_family,
-    font_size     = CONST$DISPLAY$font_size,
-    line_spacing  = CONST$DISPLAY$line_spacing,
-    col_header_bg = CONST$DISPLAY$col_header_bg
-  ),
+  DISPLAY = CONST$DISPLAY,
   BORDERS = list(
     thick = fp_border(color = CONST$BORDERS$thick$color, width = CONST$BORDERS$thick$width)
-  )
+  ),
+  TOC = list(font_size = 6.5),
+  FIG = CONST$FIG,
+  WORD = list(heading1_has_pagebreak_before = FALSE)
 )
-
-# IMPORTANT: We control page breaks in R → assume Heading 1 does NOT have "Page break before"
-CFG$WORD$heading1_has_pagebreak_before <- FALSE
 
 HDR <- list(
   left_line1  = CONST$HEADER$left_line1,
@@ -158,81 +151,6 @@ FTR <- list(
 # ==========================================================
 # Utility helpers
 # ==========================================================
-
-
-add_section_cover_page <- function(doc, heading_text, style = "heading 1") {
-  # Ensure heading starts on a fresh page (but don’t double-break)
-  doc <- add_page_break_safe(doc)
-  mark_content_added()
-  
-  # Add heading
-  doc <- officer::body_add_par(doc, heading_text, style = style)
-  mark_content_added()
-  
-  # Force next content (first table/figure/listing) onto a new page
-  doc <- force_page_break(doc)
-  mark_content_added()
-  
-  doc
-}
-
-
-
-ensure_toc_styles <- function(doc,
-                              levels = 3,
-                              font_family = CFG$DISPLAY$font_family,
-                              font_size   = CFG$DISPLAY$font_size,
-                              base_on     = "Normal") {
-  
-  fp_t <- officer::fp_text(
-    font.family = font_family,
-    font.size   = font_size,
-    bold        = FALSE,
-    color       = "black"
-  )
-  
-  # Keep TOC tight; adjust if you want more/less density
-  fp_p <- officer::fp_par(padding = 0, line_spacing = CFG$DISPLAY$line_spacing)
-  
-  for (lvl in seq_len(levels)) {
-    
-    # Word style *name* must be "TOC 1", "TOC 2", ...
-    style_name <- paste0("TOC ", lvl)
-    
-    # style_id must be ASCII and no spaces; pick a safe deterministic ID
-    style_id <- paste0("toc", lvl)
-    
-    doc <- officer::docx_set_paragraph_style(
-      x          = doc,
-      style_id   = style_id,
-      style_name = style_name,
-      base_on    = base_on,
-      fp_p       = fp_p,
-      fp_t       = fp_t
-    )
-  }
-  
-  doc
-}
-
-
-bold_table_id_line <- function(ft, line1_text, ncols) {
-  if (is.null(ft$header$dataset) || !nrow(ft$header$dataset)) return(ft)
-  if (!is.character(line1_text) || !nzchar(trimws(line1_text))) return(ft)
-  
-  hd <- ft$header$dataset
-  
-  # Find any header row where ANY cell equals the target "Table X..." line
-  # (after merges, it might live in first col or elsewhere depending on flextable internals)
-  hit_rows <- which(apply(hd, 1, function(r) any(trimws(as.character(r)) == trimws(line1_text))))
-  
-  if (!length(hit_rows)) return(ft)
-  
-  # Bold only that row (across all columns)
-  ft <- flextable::bold(ft, part = "header", i = hit_rows[1], j = seq_len(ncols), bold = TRUE)
-  ft
-}
-
 STATE <- new.env(parent = emptyenv())
 STATE$last_was_page_break <- FALSE
 
@@ -266,11 +184,156 @@ norm_key <- function(x) {
   x
 }
 
+usable_width_in <- function() {
+  PAGE$page_size$width - PAGE$margins$left - PAGE$margins$right
+}
+
+usable_height_in <- function() {
+  PAGE$page_size$height - PAGE$margins$top - PAGE$margins$bottom
+}
+
+.make_tabspec_right <- function() {
+  officer::fp_tabs(officer::fp_tab(pos = usable_width_in(), style = "right"))
+}
+
+make_page_header_block <- function(left_line1, left_line2,
+                                   font_family = CFG$DISPLAY$font_family,
+                                   font_size   = CFG$DISPLAY$font_size) {
+  tabspec <- .make_tabspec_right()
+  fp_txt  <- officer::fp_text(font.family = font_family, font.size = font_size)
+  
+  p1 <- officer::fpar(
+    officer::ftext(left_line1, prop = fp_txt),
+    officer::run_tab(),
+    officer::run_word_field("PAGE"),
+    officer::ftext(" of ", prop = fp_txt),
+    officer::run_word_field("NUMPAGES"),
+    fp_p = officer::fp_par(tabs = tabspec, padding = 0, line_spacing = 1),
+    fp_t = fp_txt
+  )
+  
+  p2 <- officer::fpar(
+    officer::ftext(left_line2, prop = fp_txt),
+    fp_p = officer::fp_par(padding = 0, line_spacing = 1),
+    fp_t = fp_txt
+  )
+  
+  officer::block_list(p1, p2)
+}
+
+make_page_footer_block <- function(program_left,
+                                   datetime_right,
+                                   font_family = CFG$DISPLAY$font_family,
+                                   font_size   = CFG$DISPLAY$font_size) {
+  tabspec <- .make_tabspec_right()
+  fp_txt  <- officer::fp_text(font.family = font_family, font.size = font_size)
+  
+  p <- officer::fpar(
+    officer::ftext(program_left, prop = fp_txt),
+    officer::run_tab(),
+    officer::ftext(datetime_right, prop = fp_txt),
+    fp_p = officer::fp_par(tabs = tabspec, padding = 0, line_spacing = 1),
+    fp_t = fp_txt
+  )
+  
+  officer::block_list(p)
+}
+
+hdr_block <- make_page_header_block(HDR$left_line1, HDR$left_line2, HDR$font_family, HDR$font_size)
+
+ftr_block <- make_page_footer_block(
+  program_left   = FTR$program_text,
+  datetime_right = FTR$datetime_text,
+  font_family    = FTR$font_family,
+  font_size      = FTR$font_size
+)
+
+blank_ftr_block <- officer::block_list(officer::fpar(officer::ftext("")))
+
+sec_landscape <- prop_section(
+  page_size    = page_size(orient = PAGE$page_size$orient, width = PAGE$page_size$width, height = PAGE$page_size$height),
+  page_margins = page_mar(top = PAGE$margins$top, bottom = PAGE$margins$bottom,
+                          left = PAGE$margins$left, right = PAGE$margins$right,
+                          header = PAGE$margins$header, footer = PAGE$margins$footer),
+  type = "continuous",
+  header_default = hdr_block, header_first = hdr_block, header_even = hdr_block,
+  footer_default = ftr_block, footer_first = ftr_block, footer_even = ftr_block
+)
+
+sec_landscape_toc <- prop_section(
+  page_size    = page_size(orient = PAGE$page_size$orient, width = PAGE$page_size$width, height = PAGE$page_size$height),
+  page_margins = page_mar(top = PAGE$margins$top, bottom = PAGE$margins$bottom,
+                          left = PAGE$margins$left, right = PAGE$margins$right,
+                          header = PAGE$margins$header, footer = PAGE$margins$footer),
+  type = "continuous",
+  header_default = hdr_block, header_first = hdr_block, header_even = hdr_block,
+  footer_default = blank_ftr_block, footer_first = blank_ftr_block, footer_even = blank_ftr_block
+)
+
+make_table_section_props <- function(base_header_block, base_footer_block) {
+  prop_section(
+    page_size    = page_size(orient = PAGE$page_size$orient, width = PAGE$page_size$width, height = PAGE$page_size$height),
+    page_margins = page_mar(top = PAGE$margins$top, bottom = PAGE$margins$bottom,
+                            left = PAGE$margins$left, right = PAGE$margins$right,
+                            header = PAGE$margins$header, footer = PAGE$margins$footer),
+    type = "continuous",
+    header_first   = base_header_block,
+    header_default = base_header_block,
+    header_even    = base_header_block,
+    footer_first   = base_footer_block,
+    footer_default = base_footer_block,
+    footer_even    = base_footer_block
+  )
+}
+
+# --- Cover page helper (ensures clean page sequencing) ---
+add_section_cover_page <- function(doc, heading_text, style = "heading 1") {
+  doc <- add_page_break_safe(doc); mark_content_added()
+  doc <- officer::body_add_par(doc, heading_text, style = style); mark_content_added()
+  doc <- force_page_break(doc); mark_content_added()
+  doc
+}
+
+# ==========================================================
+# TOC style helper
+# ==========================================================
+ensure_toc_styles <- function(doc,
+                              levels = 3,
+                              font_family = CFG$DISPLAY$font_family,
+                              font_size = CFG$TOC$font_size,
+                              base_on = "Normal") {
+  fp_t <- officer::fp_text(
+    font.family = font_family,
+    font.size   = font_size,
+    bold        = FALSE,
+    color       = "black"
+  )
+  
+  fp_p <- officer::fp_par(padding = 0, line_spacing = 0.75)
+  
+  for (lvl in seq_len(levels)) {
+    style_name <- paste0("TOC ", lvl)
+    style_id   <- paste0("TOC", lvl)  # Word internal IDs must be TOC1, TOC2, ...
+    doc <- officer::docx_set_paragraph_style(
+      x          = doc,
+      style_id   = style_id,
+      style_name = style_name,
+      base_on    = base_on,
+      fp_p       = fp_p,
+      fp_t       = fp_t
+    )
+  }
+  
+  doc
+}
+
+# ==========================================================
+# Figure helpers
+# ==========================================================
 resolve_fig_footnotes <- function(keys, placeholder_dict = NULL) {
   keys <- trimws(as.character(keys))
   keys <- keys[!is.na(keys) & keys != ""]
   if (!length(keys)) return(character(0))
-  
   if (is.null(placeholder_dict) || !length(placeholder_dict)) return(keys)
   
   kk <- tolower(keys)
@@ -279,41 +342,10 @@ resolve_fig_footnotes <- function(keys, placeholder_dict = NULL) {
   trimws(unname(mapped))
 }
 
-# split_table_or_figure_title <- function(title) {
-#   tt <- trimws(as.character(title))
-#   if (!nzchar(tt)) return(list(line1 = "", line2 = ""))
-#   
-#   tt <- sub("^.*?\\b(Table|Figure)\\b", "\\1", tt, ignore.case = TRUE)
-#   tt <- trimws(tt)
-#   
-#   m <- regexec(
-#     "^(Table|Figure)\\s+([A-Za-z0-9]+(?:[./][A-Za-z0-9]+)*)\\s*([\\.:\\-])\\s*(.*)$",
-#     tt, ignore.case = TRUE
-#   )
-#   mm <- regmatches(tt, m)[[1]]
-#   
-#   if (length(mm) == 5) {
-#     kind <- mm[2]; id <- mm[3]; sep <- mm[4]; rest <- trimws(mm[5])
-#     return(list(line1 = paste0(kind, " ", id, sep), line2 = rest))
-#   }
-#   
-#   m2 <- regexec("^(Table|Figure)\\s+([A-Za-z0-9]+(?:[./][A-Za-z0-9]+)*)(?:\\s+(.+))?$",
-#                 tt, ignore.case = TRUE)
-#   mm2 <- regmatches(tt, m2)[[1]]
-#   if (length(mm2) >= 3) {
-#     kind <- mm2[2]; id <- mm2[3]
-#     rest <- if (length(mm2) >= 4) trimws(mm2[4]) else ""
-#     return(list(line1 = paste(kind, id), line2 = rest))
-#   }
-#   
-#   list(line1 = tt, line2 = "")
-# }
-
 split_table_or_figure_title <- function(title) {
   tt <- trimws(as.character(title))
   if (!nzchar(tt)) return(list(line1 = "", line2 = ""))
   
-  # Keep only from the first occurrence of Table/Figure/Listing
   tt <- sub("^.*?\\b(Table|Figure|Listing)\\b", "\\1", tt, ignore.case = TRUE)
   tt <- trimws(tt)
   
@@ -342,156 +374,6 @@ split_table_or_figure_title <- function(title) {
   list(line1 = tt, line2 = "")
 }
 
-
-
-usable_width_in <- function() {
-  PAGE$page_size$width - PAGE$margins$left - PAGE$margins$right
-}
-
-usable_height_in <- function() {
-  PAGE$page_size$height - PAGE$margins$top - PAGE$margins$bottom
-}
-
-.make_tabspec_right <- function() {
-  officer::fp_tabs(officer::fp_tab(pos = usable_width_in(), style = "right"))
-}
-
-make_page_header_block <- function(left_line1, left_line2,
-                                   font_family = CFG$DISPLAY$font_family,
-                                   font_size   = CFG$DISPLAY$font_size) {
-  
-  tabspec <- .make_tabspec_right()
-  fp_txt  <- officer::fp_text(font.family = font_family, font.size = font_size)
-  
-  p1 <- officer::fpar(
-    officer::ftext(left_line1, prop = fp_txt),
-    officer::run_tab(),
-    officer::run_word_field("PAGE"),
-    officer::ftext(" of ", prop = fp_txt),
-    officer::run_word_field("NUMPAGES"),
-    fp_p = officer::fp_par(tabs = tabspec, padding = 0, line_spacing = 1),
-    fp_t = fp_txt
-  )
-  
-  p2 <- officer::fpar(
-    officer::ftext(left_line2, prop = fp_txt),
-    fp_p = officer::fp_par(padding = 0, line_spacing = 1),
-    fp_t = fp_txt
-  )
-  
-  officer::block_list(p1, p2)
-}
-
-make_page_footer_block <- function(program_left,
-                                   datetime_right,
-                                   font_family = CFG$DISPLAY$font_family,
-                                   font_size   = CFG$DISPLAY$font_size) {
-  
-  tabspec <- .make_tabspec_right()
-  fp_txt  <- officer::fp_text(font.family = font_family, font.size = font_size)
-  
-  p <- officer::fpar(
-    officer::ftext(program_left, prop = fp_txt),
-    officer::run_tab(),
-    officer::ftext(datetime_right, prop = fp_txt),
-    fp_p = officer::fp_par(tabs = tabspec, padding = 0, line_spacing = 1),
-    fp_t = fp_txt
-  )
-  
-  officer::block_list(p)
-}
-
-hdr_block <- make_page_header_block(HDR$left_line1, HDR$left_line2, HDR$font_family, HDR$font_size)
-
-ftr_block <- make_page_footer_block(
-  program_left   = FTR$program_text,
-  datetime_right = FTR$datetime_text,
-  font_family    = FTR$font_family,
-  font_size      = FTR$font_size
-)
-
-blank_ftr_block <- officer::block_list(
-  officer::fpar(officer::ftext(""))
-)
-
-sec_landscape <- prop_section(
-  page_size    = page_size(orient = PAGE$page_size$orient,
-                           width  = PAGE$page_size$width,
-                           height = PAGE$page_size$height),
-  page_margins = page_mar(top    = PAGE$margins$top,
-                          bottom = PAGE$margins$bottom,
-                          left   = PAGE$margins$left,
-                          right   = PAGE$margins$right,
-                          header = PAGE$margins$header,
-                          footer = PAGE$margins$footer),
-  type = "continuous",
-  
-  header_default = hdr_block,
-  header_first   = hdr_block,
-  header_even    = hdr_block,
-  
-  footer_default = ftr_block,
-  footer_first   = ftr_block,
-  footer_even    = ftr_block
-)
-
-sec_landscape_toc <- prop_section(
-  page_size    = page_size(orient = PAGE$page_size$orient,
-                           width  = PAGE$page_size$width,
-                           height = PAGE$page_size$height),
-  page_margins = page_mar(top    = PAGE$margins$top,
-                          bottom = PAGE$margins$bottom,
-                          left   = PAGE$margins$left,
-                          right   = PAGE$margins$right,
-                          header = PAGE$margins$header,
-                          footer = PAGE$margins$footer),
-  type = "continuous",
-  
-  header_default = hdr_block,
-  header_first   = hdr_block,
-  header_even    = hdr_block,
-  
-  footer_default = blank_ftr_block,
-  footer_first   = blank_ftr_block,
-  footer_even    = blank_ftr_block
-)
-
-make_table_section_props <- function(title, analysis_set,
-                                     base_header_block,
-                                     base_footer_block) {
-  
-  prop_section(
-    page_size    = page_size(orient = PAGE$page_size$orient,
-                             width  = PAGE$page_size$width,
-                             height = PAGE$page_size$height),
-    page_margins = page_mar(top    = PAGE$margins$top,
-                            bottom = PAGE$margins$bottom,
-                            left   = PAGE$margins$left,
-                            right   = PAGE$margins$right,
-                            header = PAGE$margins$header,
-                            footer = PAGE$margins$footer),
-    type = "continuous",
-    
-    header_first   = base_header_block,
-    header_default = base_header_block,
-    header_even    = base_header_block,
-    
-    footer_first   = base_footer_block,
-    footer_default = base_footer_block,
-    footer_even    = base_footer_block
-  )
-}
-
-if (is.null(CFG$FIG)) {
-  CFG$FIG <- list(
-    width_frac       = 0.88,
-    max_width        = 9.2,
-    default_aspect   = 0.58,
-    max_height_frac  = 0.58,
-    dpi              = 300
-  )
-}
-
 fig_target_width_in <- function() {
   w <- usable_width_in() * CFG$FIG$width_frac
   if (is.finite(CFG$FIG$max_width)) w <- min(w, CFG$FIG$max_width)
@@ -515,21 +397,6 @@ cap_fig_wh_to_max_height <- function(w, h) {
   list(w = w, h = h)
 }
 
-safe_write_docx <- function(doc, out_file) {
-  tmp <- tempfile(pattern = "docx_tmp_", fileext = ".docx")
-  print(doc, target = tmp)
-  Sys.sleep(0.3)
-  
-  if (!file.exists(tmp)) stop("DOCX write failed: temp file not created: ", tmp, call. = FALSE)
-  
-  dir.create(dirname(out_file), recursive = TRUE, showWarnings = FALSE)
-  ok <- file.copy(tmp, out_file, overwrite = TRUE)
-  if (!ok || !file.exists(out_file)) stop("DOCX write failed: temp created but copy failed to: ", out_file, call. = FALSE)
-  
-  unlink(tmp)
-  invisible(out_file)
-}
-
 strip_plot_titles <- function(p) {
   if (inherits(p, "gg")) {
     return(
@@ -544,12 +411,8 @@ strip_plot_titles <- function(p) {
   }
   
   if (inherits(p, "ggsurvplot")) {
-    if (!is.null(p$plot) && inherits(p$plot, "gg")) {
-      p$plot <- strip_plot_titles(p$plot)
-    }
-    if (!is.null(p$table) && inherits(p$table, "gg")) {
-      p$table <- strip_plot_titles(p$table)
-    }
+    if (!is.null(p$plot) && inherits(p$plot, "gg"))  p$plot  <- strip_plot_titles(p$plot)
+    if (!is.null(p$table) && inherits(p$table, "gg")) p$table <- strip_plot_titles(p$table)
     return(p)
   }
   
@@ -557,14 +420,12 @@ strip_plot_titles <- function(p) {
 }
 
 render_plot_to_png <- function(plot_obj, png_file, width = 6.8, height = 4.6, dpi = 300) {
-  
   p <- plot_obj
   if (is.list(plot_obj) && !inherits(plot_obj, c("gg", "ggsurvplot"))) {
     if (!is.null(plot_obj$plot)) p <- plot_obj$plot
   }
   
   p <- strip_plot_titles(p)
-  
   dir.create(dirname(png_file), recursive = TRUE, showWarnings = FALSE)
   
   if (inherits(p, "ggsurvplot")) {
@@ -605,6 +466,35 @@ render_plot_to_png <- function(plot_obj, png_file, width = 6.8, height = 4.6, dp
   stop("Unsupported plot object class: ", paste(class(p), collapse = ", "), call. = FALSE)
 }
 
+add_figure_toc_heading_hidden <- function(doc, fig_title, analysis_set = "",
+                                          font_family = CFG$DISPLAY$font_family,
+                                          toc_font_size = 1,
+                                          style = "heading 1") {
+  analysis_set_clean <- trimws(as.character(analysis_set %||% ""))
+  
+  spl  <- split_table_or_figure_title(fig_title)
+  base <- trimws(paste(spl$line1, spl$line2))
+  
+  toc_text <- if (nzchar(analysis_set_clean)) paste0(base, " (", analysis_set_clean, ")") else base
+  
+  fp_txt <- officer::fp_text(
+    font.family = font_family,
+    font.size   = toc_font_size,
+    bold        = FALSE,
+    color       = "white"
+  )
+  
+  fp_par <- officer::fp_par(padding = 0, line_spacing = 0.6)
+  
+  doc <- officer::body_add_fpar(
+    doc,
+    officer::fpar(officer::ftext(toc_text, prop = fp_txt), fp_p = fp_par),
+    style = style
+  )
+  
+  doc
+}
+
 add_figure_png_to_doc <- function(doc,
                                   fig_title,
                                   analysis_set = "",
@@ -621,13 +511,7 @@ add_figure_png_to_doc <- function(doc,
   
   analysis_set_clean <- trimws(as.character(analysis_set %||% ""))
   
-  title_for_toc <- if (nzchar(analysis_set_clean)) {
-    paste0(fig_title, " (", analysis_set_clean, ")")
-  } else {
-    fig_title
-  }
-  
-  #doc <- officer::body_add_par(doc, title_for_toc, style = style_title)
+  # Hidden heading for TOC pickup
   doc <- add_figure_toc_heading_hidden(
     doc = doc,
     fig_title = fig_title,
@@ -635,10 +519,10 @@ add_figure_png_to_doc <- function(doc,
     font_family = font_family,
     style = style_title
   )
+  mark_content_added()
   
   if (isTRUE(repeat_centered_title)) {
-    spl <- split_table_or_figure_title(fig_title)
-   # fp_txt <- officer::fp_text(font.family = font_family, font.size = font_size)
+    spl   <- split_table_or_figure_title(fig_title)
     fp_txt <- officer::fp_text(font.family = font_family, font.size = font_size, bold = FALSE)
     fp_ctr <- officer::fp_par(text.align = "center")
     
@@ -648,6 +532,7 @@ add_figure_png_to_doc <- function(doc,
     if (nzchar(spl$line2)) {
       doc <- officer::body_add_fpar(doc, officer::fpar(officer::ftext(spl$line2, prop = fp_txt), fp_p = fp_ctr))
     }
+    mark_content_added()
   }
   
   if (isTRUE(show_analysis_set_line) && nzchar(analysis_set_clean)) {
@@ -658,16 +543,15 @@ add_figure_png_to_doc <- function(doc,
         fp_p = officer::fp_par(text.align = "center")
       )
     )
+    mark_content_added()
   }
   
-  doc <- officer::body_add_par(doc, "", style = style_text)
-  doc <- officer::body_add_par(doc, "", style = style_text)
+  doc <- officer::body_add_par(doc, "", style = style_text); mark_content_added()
+  doc <- officer::body_add_par(doc, "", style = style_text); mark_content_added()
   
   img <- officer::external_img(src = png_file, width = img_width, height = img_height)
-  
   doc <- officer::body_add_fpar(doc, officer::fpar(img, fp_p = officer::fp_par(text.align = "center")))
-  
-  # <-- REMOVE the trailing blank line here
+  mark_content_added()
   
   if (length(footnotes)) {
     for (fn in footnotes) {
@@ -680,12 +564,15 @@ add_figure_png_to_doc <- function(doc,
         )
       }
     }
-    # <-- REMOVE the trailing blank line here too
+    mark_content_added()
   }
   
   doc
 }
 
+# ==========================================================
+# Dictionary / Column spec helpers
+# ==========================================================
 read_placeholder_dict <- function(excel_path, dict_sheet = CONST$SHEETS$dict_sheet) {
   sheets <- readxl::excel_sheets(excel_path)
   if (!(dict_sheet %in% sheets)) return(NULL)
@@ -707,69 +594,6 @@ read_placeholder_dict <- function(excel_path, dict_sheet = CONST$SHEETS$dict_she
   dict
 }
 
-# read_column_spec <- function(excel_path, row_sheet_name) {
-#   sheets <- readxl::excel_sheets(excel_path)
-#   
-#   norm <- function(x) {
-#     x <- tolower(trimws(x))
-#     x <- gsub("\\s+", " ", x)
-#     x
-#   }
-#   nospace <- function(x) gsub("\\s+", "", norm(x))
-#   
-#   row_nospace <- nospace(row_sheet_name)
-#   
-#   candidates <- unique(c(
-#     paste0(row_sheet_name, "__COLUMNS"),
-#     paste0(row_sheet_name, " __COLUMNS"),
-#     paste0(row_sheet_name, "_COLUMNS"),
-#     paste0(row_sheet_name, " _COLUMNS"),
-#     paste0(gsub("\\s+", "", row_sheet_name), "__COLUMNS"),
-#     paste0(gsub("\\s+", "", row_sheet_name), "_COLUMNS"),
-#     paste0(row_nospace, "__COLUMNS"),
-#     paste0(row_nospace, "_COLUMNS")
-#   ))
-#   
-#   spec_sheet <- candidates[candidates %in% sheets][1]
-#   
-#   if (is.na(spec_sheet) || !nzchar(spec_sheet)) {
-#     sheet_map <- data.frame(raw = sheets, n1 = norm(sheets), n2 = nospace(sheets), stringsAsFactors = FALSE)
-#     cand_map  <- data.frame(raw = candidates, n1 = norm(candidates), n2 = nospace(candidates), stringsAsFactors = FALSE)
-#     
-#     hit <- sheet_map$raw[sheet_map$n1 %in% cand_map$n1 | sheet_map$n2 %in% cand_map$n2][1]
-#     spec_sheet <- hit
-#   }
-#   
-#   if (is.na(spec_sheet) || !nzchar(spec_sheet)) return(NULL)
-#   
-#   cs <- readxl::read_xlsx(excel_path, sheet = spec_sheet)
-#   names(cs) <- tolower(trimws(names(cs)))
-#   
-#   req  <- c("col_key", "level2")
-#   miss <- setdiff(req, names(cs))
-#   if (length(miss)) stop("ColumnSpec sheet '", spec_sheet, "' missing: ", paste(miss, collapse = ", "), call. = FALSE)
-#   
-#   if (!"level1"  %in% names(cs)) cs$level1  <- ""
-#   if (!"level3"  %in% names(cs)) cs$level3  <- ""
-#   if (!"width"   %in% names(cs)) cs$width   <- NA_real_
-#   if (!"align"   %in% names(cs)) cs$align   <- ""
-#   if (!"is_stub" %in% names(cs)) cs$is_stub <- FALSE
-#   
-#   cs$col_key <- normalize_empty(cs$col_key)
-#   cs$level1  <- normalize_empty(cs$level1)
-#   cs$level2  <- normalize_empty(cs$level2)
-#   cs$level3  <- normalize_empty(cs$level3)
-#   cs$align   <- normalize_empty(cs$align)
-#   cs$is_stub <- as.logical(cs$is_stub)
-#   
-#   cs <- cs[cs$col_key != "", , drop = FALSE]
-#   if (!nrow(cs)) return(NULL)
-#   
-#   if (!any(cs$is_stub)) cs$is_stub <- cs$col_key %in% c("Description", "Description2", "Statistic")
-#   cs
-#}
-
-
 read_column_spec <- function(excel_path, row_sheet_name) {
   sheets <- readxl::excel_sheets(excel_path)
   
@@ -782,36 +606,20 @@ read_column_spec <- function(excel_path, row_sheet_name) {
   
   row_nospace <- nospace(row_sheet_name)
   
-  # NEW: allow short suffixes too
   suffixes <- c("C", "COL", "COLUMNS")
-  joiners  <- c("__", " __", "_", " _")  # keep your existing join styles
+  joiners  <- c("__", " __", "_", " _")
   
-  # Build candidate names like:
-  # "T 3__C", "T 3__COL", "T 3__COLUMNS", "T 3 _COLUMNS", etc.
-  base_names <- unique(c(
-    row_sheet_name,
-    gsub("\\s+", "", row_sheet_name),
-    row_nospace
-  ))
+  base_names <- unique(c(row_sheet_name, gsub("\\s+", "", row_sheet_name), row_nospace))
   
   candidates <- unique(unlist(lapply(base_names, function(bn) {
-    unlist(lapply(joiners, function(jn) {
-      paste0(bn, jn, suffixes)
-    }))
+    unlist(lapply(joiners, function(jn) paste0(bn, jn, suffixes)))
   })))
   
   spec_sheet <- candidates[candidates %in% sheets][1]
   
   if (is.na(spec_sheet) || !nzchar(spec_sheet)) {
     sheet_map <- data.frame(raw = sheets, n1 = norm(sheets), n2 = nospace(sheets), stringsAsFactors = FALSE)
-    
-    cand_map  <- data.frame(
-      raw = candidates,
-      n1  = norm(candidates),
-      n2  = nospace(candidates),
-      stringsAsFactors = FALSE
-    )
-    
+    cand_map  <- data.frame(raw = candidates, n1 = norm(candidates), n2 = nospace(candidates), stringsAsFactors = FALSE)
     hit <- sheet_map$raw[sheet_map$n1 %in% cand_map$n1 | sheet_map$n2 %in% cand_map$n2][1]
     spec_sheet <- hit
   }
@@ -845,28 +653,6 @@ read_column_spec <- function(excel_path, row_sheet_name) {
   cs
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 colspec_to_header_df <- function(col_spec) {
   hdr <- data.frame(
     col_keys = col_spec$col_key,
@@ -899,11 +685,14 @@ set_header_labels_if_needed <- function(ft, labels_named) {
   do.call(flextable::set_header_labels, c(list(x = ft), as.list(labels_named)))
 }
 
+# ==========================================================
+# Table build helpers
+# ==========================================================
 apply_standard_theme <- function(ft) {
   d <- CFG$DISPLAY
   b <- CFG$BORDERS
   
-  ft <- ft |>
+  ft |>
     flextable::theme_booktabs() |>
     flextable::font(part = "all", fontname = d$font_family) |>
     flextable::fontsize(part = "all", size = d$font_size) |>
@@ -915,8 +704,6 @@ apply_standard_theme <- function(ft) {
                        padding.left = 2, padding.right = 2) |>
     flextable::bg(part = "header", bg = d$col_header_bg) |>
     flextable::hline_bottom(part = "header", border = b$thick)
-  
-  ft
 }
 
 apply_multilevel_headers <- function(ft, col_spec) {
@@ -1106,7 +893,6 @@ parse_blank_cols <- function(spec, col_keys, data_cols) {
 }
 
 table_spec_to_body <- function(rows_spec, col_spec, placeholder_dict = NULL) {
-  
   col_keys <- if (is.null(col_spec)) CONST$DEFAULTS$default_col_keys else col_spec$col_key
   n <- nrow(rows_spec)
   
@@ -1124,15 +910,12 @@ table_spec_to_body <- function(rows_spec, col_spec, placeholder_dict = NULL) {
   
   is_hline <- types == CONST$TYPES$hline
   
-  if ("Description" %in% col_keys)
-    out$Description[!is_hline] <- desc[!is_hline]
+  if ("Description" %in% col_keys) out$Description[!is_hline] <- desc[!is_hline]
   
   desc2 <- if ("desc2" %in% names(rows_spec)) normalize_empty(rows_spec$desc2) else rep("", n)
-  if ("Description2" %in% col_keys)
-    out$Description2[!is_hline] <- desc2[!is_hline]
+  if ("Description2" %in% col_keys) out$Description2[!is_hline] <- desc2[!is_hline]
   
-  if ("Statistic" %in% col_keys)
-    out$Statistic[] <- ""
+  if ("Statistic" %in% col_keys) out$Statistic[] <- ""
   
   special <- c(CONST$TYPES$section, CONST$TYPES$blankstat, CONST$TYPES$pagebreak,
                CONST$TYPES$hline, CONST$TYPES$toprule, CONST$TYPES$footnote)
@@ -1181,48 +964,12 @@ table_spec_to_body <- function(rows_spec, col_spec, placeholder_dict = NULL) {
   tibble::as_tibble(out)
 }
 
-add_title_block <- function(doc, title, analysis_set,
-                            show_analysis_set_line = TRUE,
-                            toc_sep = " (", toc_end = ")") {
-  
-  analysis_set_clean <- trimws(as.character(analysis_set %||% ""))
-  
-  title_for_toc <- if (nzchar(analysis_set_clean)) {
-    paste0(title, toc_sep, analysis_set_clean, toc_end)
-  } else {
-    title
-  }
-  
-  doc <- officer::body_add_par(doc, value = title_for_toc, style = "heading 1")
-  
-  if (isTRUE(show_analysis_set_line) && nzchar(analysis_set_clean)) {
-    doc <- officer::body_add_fpar(
-      doc,
-      officer::fpar(
-        officer::ftext(
-          analysis_set_clean,
-          officer::fp_text(
-            font.size   = CFG$DISPLAY$font_size,
-            font.family = CFG$DISPLAY$font_family
-          )
-        ),
-        fp_p = officer::fp_par(text.align = "center")
-      )
-    )
-  }
-  
-  doc <- officer::body_add_par(doc, "", style = "Normal")
-  doc
-}
-
-
 add_repeating_table_title_header <- function(ft, title, analysis_set = "",
                                              ncols,
                                              font_family = CFG$DISPLAY$font_family,
                                              font_size   = CFG$DISPLAY$font_size,
                                              make_top_line_bold = FALSE,
                                              add_rule_under_block = TRUE) {
-  
   spl <- split_table_or_figure_title(title)
   as_clean <- trimws(as.character(analysis_set %||% ""))
   
@@ -1235,28 +982,20 @@ add_repeating_table_title_header <- function(ft, title, analysis_set = "",
   
   # Add lines so final order at top is: line1, line2, analysis_set
   for (k in rev(lines)) {
-    ft <- flextable::add_header_row(
-      ft,
-      values    = rep(k, ncols),
-      colwidths = rep(1, ncols)
-    )
+    ft <- flextable::add_header_row(ft, values = rep(k, ncols), colwidths = rep(1, ncols))
   }
   
   n_added <- length(lines)
   
-  # Format those newly-added title rows (they are now header rows 1:n_added)
   for (i in seq_len(n_added)) {
     ft <- flextable::merge_h(ft, part = "header", i = i)
     ft <- flextable::align(ft, part = "header", i = i, align = "center")
     ft <- flextable::font(ft, part = "header", i = i, fontname = font_family)
     ft <- flextable::fontsize(ft, part = "header", i = i, size = font_size)
-    
-    # Force title lines NOT bold and NOT shaded
     ft <- flextable::bold(ft, part = "header", i = i, bold = FALSE)
-    ft <- flextable::bg(ft,   part = "header", i = i, bg = "white")
+    ft <- flextable::bg(ft, part = "header", i = i, bg = "white")
   }
   
-  # (Optional) if you ever want top line bold again, keep the hook:
   if (isTRUE(make_top_line_bold)) {
     ft <- flextable::bold(ft, part = "header", i = 1, bold = TRUE)
   }
@@ -1268,69 +1007,29 @@ add_repeating_table_title_header <- function(ft, title, analysis_set = "",
   ft
 }
 
-
-
-
-
+# FAST(ER) indent: apply per indent level (few calls) instead of per row (many calls)
 apply_desc_indent <- function(ft, rows_spec, indent_col = "desc_indent",
                               j = "Description",
-                              base_padding_left = 2, indent_step = 10,
-                              valid_cols = NULL) {
+                              base_padding_left = 2, indent_step = 10) {
+  if (is.null(rows_spec) || !(indent_col %in% names(rows_spec))) return(ft)
   
-  if (is.null(valid_cols)) {
-    valid_cols <- tryCatch(names(ft$body$dataset), error = function(e) character(0))
-  }
-  if (!(indent_col %in% names(rows_spec))) return(ft)
-  if (!length(valid_cols) || !(j %in% valid_cols)) return(ft)
+  cols <- tryCatch(names(ft$body$dataset), error = function(e) character(0))
+  if (!(j %in% cols)) return(ft)
   
-  ind <- suppressWarnings(as.numeric(rows_spec[[indent_col]]))
-  ind[is.na(ind)] <- 0
-  ind <- pmax(0, ind)
+  ind <- suppressWarnings(as.integer(rows_spec[[indent_col]]))
+  ind[is.na(ind)] <- 0L
+  ind <- pmax(0L, ind)
   
-  for (i in seq_along(ind)) {
-    ft <- flextable::padding(
-      ft, i = i, j = j, part = "body",
-      padding.left = base_padding_left + indent_step * ind[i]
-    )
+  for (lvl in sort(unique(ind))) {
+    idx <- which(ind == lvl)
+    if (length(idx)) {
+      ft <- flextable::padding(
+        ft, i = idx, j = j, part = "body",
+        padding.left = base_padding_left + indent_step * lvl
+      )
+    }
   }
   ft
-}
-
-
-
-
-add_figure_toc_heading_hidden <- function(doc, fig_title, analysis_set = "",
-                                          font_family = CFG$DISPLAY$font_family,
-                                          toc_font_size = 1,
-                                          style = "heading 1") {
-  
-  analysis_set_clean <- trimws(as.character(analysis_set %||% ""))
-  
-  spl  <- split_table_or_figure_title(fig_title)
-  base <- trimws(paste(spl$line1, spl$line2))
-  
-  toc_text <- if (nzchar(analysis_set_clean)) {
-    paste0(base, " (", analysis_set_clean, ")")
-  } else {
-    base
-  }
-  
-  fp_txt <- officer::fp_text(
-    font.family = font_family,
-    font.size   = toc_font_size,
-    bold        = FALSE,
-    color       = "white"
-  )
-  
-  fp_par <- officer::fp_par(padding = 0, line_spacing = 0.6)
-  
-  doc <- officer::body_add_fpar(
-    doc,
-    officer::fpar(officer::ftext(toc_text, prop = fp_txt), fp_p = fp_par),
-    style = style
-  )
-  
-  doc
 }
 
 add_table_toc_heading_hidden <- function(doc, title, analysis_set = "",
@@ -1338,34 +1037,23 @@ add_table_toc_heading_hidden <- function(doc, title, analysis_set = "",
                                          toc_font_size = 1,
                                          style = "heading 1") {
   analysis_set_clean <- trimws(as.character(analysis_set %||% ""))
-  
-  # Build a single-line TOC string from your 3-level block
   spl <- split_table_or_figure_title(title)
   base <- trimws(paste(spl$line1, spl$line2))
-  toc_text <- if (nzchar(analysis_set_clean)) {
-    paste0(base, " (", analysis_set_clean, ")")
-  } else {
-    base
-  }
+  toc_text <- if (nzchar(analysis_set_clean)) paste0(base, " (", analysis_set_clean, ")") else base
   
-  # Make it "invisible": tiny + white + not bold
   fp_txt <- officer::fp_text(
     font.family = font_family,
     font.size   = toc_font_size,
     bold        = FALSE,
     color       = "white"
   )
-  
-  # Keep paragraph tight (minimises vertical footprint)
   fp_par <- officer::fp_par(padding = 0, line_spacing = 0.6)
   
-  doc <- officer::body_add_fpar(
+  officer::body_add_fpar(
     doc,
     officer::fpar(officer::ftext(toc_text, prop = fp_txt), fp_p = fp_par),
     style = style
   )
-  
-  doc
 }
 
 make_table <- function(doc, title, analysis_set, rows_spec, col_spec = NULL,
@@ -1406,20 +1094,9 @@ make_table <- function(doc, title, analysis_set, rows_spec, col_spec = NULL,
     font_size    = CFG$DISPLAY$font_size
   )
   
-#  spl <- split_table_or_figure_title(title)  # same helper you already use
-#ft  <- bold_table_id_line(ft, line1_text = spl$line1, ncols = ncol(tbl_body))
-  # DEBUG: inspect header dataset (remove after)
-  #print(ft$header$dataset)
-  
-  # Re-enforce bold for the top repeating title line
- # ft <- flextable::bold(ft, part = "header", i = 1, bold = TRUE)  # new to have bold titles on tables!
-  
   ft <- flextable::align(ft, part = "header", align = "center")
   
-  if (isTRUE(has_toprule)) {
-    ft <- apply_toprule_if_requested(ft, rows_spec, CFG$BORDERS$thick)
-  }
-  
+  if (isTRUE(has_toprule)) ft <- apply_toprule_if_requested(ft, rows_spec, CFG$BORDERS$thick)
   ft <- apply_hline_rows(ft, rows_spec2, CFG$BORDERS$thick)
   
   if (nrow(tbl_body) > 0) {
@@ -1429,20 +1106,14 @@ make_table <- function(doc, title, analysis_set, rows_spec, col_spec = NULL,
   ft <- add_footnotes_footer(ft, footnotes)
   
   ft <- apply_desc_indent(ft, rows_spec2, indent_col = "desc_indent",
-                          j = "Description", base_padding_left = 2, indent_step = 10,
-                          valid_cols = names(tbl_body))
+                          j = "Description", base_padding_left = 2, indent_step = 10)
   
-  if ("Description" %in% names(tbl_body))
-    ft <- flextable::align(ft, j = "Description", part = "body", align = "left")
-  if ("Description2" %in% names(tbl_body))
-    ft <- flextable::align(ft, j = "Description2", part = "body", align = "left")
-  if ("Statistic" %in% names(tbl_body))
-    ft <- flextable::align(ft, j = "Statistic", part = "body", align = "center")
+  if ("Description" %in% names(tbl_body))  ft <- flextable::align(ft, j = "Description",  part = "body", align = "left")
+  if ("Description2" %in% names(tbl_body)) ft <- flextable::align(ft, j = "Description2", part = "body", align = "left")
+  if ("Statistic" %in% names(tbl_body))    ft <- flextable::align(ft, j = "Statistic",    part = "body", align = "center")
   
   other_cols <- setdiff(names(tbl_body), c("Description", "Description2", "Statistic"))
-  if (length(other_cols) > 0) {
-    ft <- flextable::align(ft, j = other_cols, part = "body", align = "center")
-  }
+  if (length(other_cols) > 0) ft <- flextable::align(ft, j = other_cols, part = "body", align = "center")
   
   ft <- flextable::set_table_properties(
     ft,
@@ -1452,28 +1123,14 @@ make_table <- function(doc, title, analysis_set, rows_spec, col_spec = NULL,
     opts_word = list(repeat_headers = TRUE, split = TRUE)
   )
   
-
-
-  # Add a hidden Heading 1 so the TOC picks up the table entry
+  # Hidden Heading 1 for TOC pickup
   doc <- add_table_toc_heading_hidden(doc, title = title, analysis_set = analysis_set)
   mark_content_added()
-  
-  # (Optional) small spacer – you may not need it anymore
-  # doc <- officer::body_add_par(doc, "", style = "Normal")
-  # mark_content_added()
   
   doc <- flextable::body_add_flextable(doc, ft)
   mark_content_added()
   
-  
-    
-  sec_tbl <- make_table_section_props(
-    title = title,
-    analysis_set = analysis_set,
-    base_header_block = hdr_block,
-    base_footer_block = ftr_block
-  )
-  
+  sec_tbl <- make_table_section_props(base_header_block = hdr_block, base_footer_block = ftr_block)
   doc <- officer::body_end_block_section(doc, value = officer::block_section(sec_tbl))
   mark_content_added()
   
@@ -1497,7 +1154,7 @@ read_and_create_table <- function(doc, excel_path, sheet_name, placeholder_dict 
   
   col_spec <- read_column_spec(excel_path, sheet_name)
   
-  doc <- make_table(
+  make_table(
     doc              = doc,
     title            = title,
     analysis_set     = analysis_set,
@@ -1505,8 +1162,24 @@ read_and_create_table <- function(doc, excel_path, sheet_name, placeholder_dict 
     col_spec         = col_spec,
     placeholder_dict = placeholder_dict
   )
+}
+
+# ==========================================================
+# File output helper
+# ==========================================================
+safe_write_docx <- function(doc, out_file) {
+  tmp <- tempfile(pattern = "docx_tmp_", fileext = ".docx")
+  print(doc, target = tmp)
+  Sys.sleep(0.3)
   
-  doc
+  if (!file.exists(tmp)) stop("DOCX write failed: temp file not created: ", tmp, call. = FALSE)
+  
+  dir.create(dirname(out_file), recursive = TRUE, showWarnings = FALSE)
+  ok <- file.copy(tmp, out_file, overwrite = TRUE)
+  if (!ok || !file.exists(out_file)) stop("DOCX write failed: temp created but copy failed to: ", out_file, call. = FALSE)
+  
+  unlink(tmp)
+  invisible(out_file)
 }
 
 # ==========================================================
@@ -1517,109 +1190,58 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 placeholder_dict <- read_placeholder_dict(excel_path, dict_sheet = DICT_SHEET)
 
 doc <- officer::read_docx()
-
 doc <- officer::body_set_default_section(doc, value = sec_landscape)
 
+# ---- TOC ----
 doc <- officer::body_add_par(doc, "Contents", style = "heading 1"); mark_content_added()
-
-
+doc <- officer::body_add_toc(doc, level = 1); mark_content_added()
 doc <- ensure_toc_styles(
   doc,
-  levels      = 3,                     # or 1 if you truly only want TOC 1
+  levels      = 3,
   font_family = CFG$DISPLAY$font_family,
-  font_size   = CFG$DISPLAY$font_size
+  font_size   = CFG$TOC$font_size
 )
-
-
-doc <- officer::body_add_toc(doc, level = 1); mark_content_added()
 doc <- officer::body_add_par(doc, "", style = "Normal"); mark_content_added()
 
-
-
+# End TOC section ONCE (removed duplicate block from original)
 doc <- officer::body_end_block_section(doc, value = officer::block_section(sec_landscape_toc))
+doc <- force_page_break(doc); mark_content_added()
 
-# Force new page after TOC (controlled in R)
-doc <- force_page_break(doc)
-
-
-#----------------------
-# After TOC section ends
-doc <- officer::body_end_block_section(doc, value = officer::block_section(sec_landscape_toc))
-
-# Force new page after TOC (controlled in R)
-doc <- force_page_break(doc)
-mark_content_added()
-
-# ---- TABLES cover page ----
+# ---- TABLES ----
 doc <- add_section_cover_page(doc, "Tables")
-#----------------------
-
 
 sheets <- readxl::excel_sheets(excel_path)
 
-# ---- TABLES ----
 row_sheets <- sheets[grepl(CONST$REGEX$table_sheets, sheets, ignore.case = TRUE)]
 if (!length(row_sheets)) {
-  stop("No table sheets matched table_sheets regex. Rename sheets like 'TABLE 1' / 'TABLE 14.1.1.1'.", call. = FALSE)
+  stop("No table sheets matched table_sheets regex. Rename sheets like 'TABLE 1' / 'T 14.1.1'.", call. = FALSE)
 }
 
 message("Processing row-spec sheets:")
 message(paste(" -", row_sheets, collapse = "\n"))
 
-first_table <- TRUE
-for (sh in row_sheets) {
-  
-  # Add page break BEFORE each table EXCEPT the very first one
-  if (!first_table) {
-    doc <- force_page_break(doc)
-  }
-  first_table <- FALSE
-  
+for (i in seq_along(row_sheets)) {
+  sh <- row_sheets[[i]]
+  if (i > 1) doc <- force_page_break(doc)
   doc <- read_and_create_table(doc, excel_path, sh, placeholder_dict = placeholder_dict)
 }
 
 # ---- FIGURES ----
-#fig_sheets <- sheets[grepl("^FIG_\\d+$", sheets, ignore.case = TRUE)]
 fig_sheets <- sheets[grepl(CONST$REGEX$figure_sheets, sheets, ignore.case = TRUE)]
-
-# if (length(fig_sheets)) {
-#   
-#   # Use safe break instead of always forcing one
-#   doc <- add_page_break_safe(doc)
-#   
-#   doc <- officer::body_add_par(doc, "Figures", style = "heading 1"); mark_content_added()
-#   doc <- officer::body_add_par(doc, "", style = "Normal"); mark_content_added()
-# }
-
-##---new
-
 if (length(fig_sheets)) {
   doc <- add_section_cover_page(doc, "Figures")
-}
-
-
-##---
-
-
-
-fig_out_dir <- file.path(out_dir, "figures")
-dir.create(fig_out_dir, recursive = TRUE, showWarnings = FALSE)
-
-first_figure <- TRUE
-if (length(fig_sheets)) {
-  for (fs in fig_sheets) {
-    
-    # Add page break BEFORE each figure EXCEPT the very first one
-    if (!first_figure) {
-      doc <- force_page_break(doc)
-    }
-    first_figure <- FALSE
+  
+  fig_out_dir <- file.path(out_dir, "figures")
+  dir.create(fig_out_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  for (i in seq_along(fig_sheets)) {
+    fs <- fig_sheets[[i]]
+    if (i > 1) doc <- force_page_break(doc)
     
     raw_spec <- read_fig_kv_spec(excel_path, sheet = fs)
     fig_spec <- normalise_fig_spec(raw_spec)
     
     fig_obj <- build_figure(fig_spec)
-    
     fig_fns <- resolve_fig_footnotes(fig_spec$footnotes, placeholder_dict = placeholder_dict)
     
     png_file <- file.path(fig_out_dir, paste0(fs, ".png"))
@@ -1644,53 +1266,20 @@ if (length(fig_sheets)) {
       font_family  = CFG$DISPLAY$font_family,
       font_size    = CFG$DISPLAY$font_size
     )
-    
-    mark_content_added()
   }
 }
-
-# ---- LISTINGS ----
-# listing_sheets <- sheets[grepl(CONST$REGEX$listing_sheets, sheets, ignore.case = TRUE)]
-# 
-# if (length(listing_sheets)) {
-#   
-#   # Start Listings section on a new page (safe to avoid double blank pages)
-#   doc <- add_page_break_safe(doc)
-#   
-#   # Section heading
-#   doc <- officer::body_add_par(doc, "Listings", style = "heading 1"); mark_content_added()
-#   doc <- officer::body_add_par(doc, "", style = "Normal"); mark_content_added()
-#   
-#   first_listing <- TRUE
-#   for (sh in listing_sheets) {
-#     
-#     # Page break BEFORE each listing except first listing in the section
-#     if (!first_listing) {
-#       doc <- force_page_break(doc)
-#     }
-#     first_listing <- FALSE
-#     
-#     # Reuse the same table machinery
-#     doc <- read_and_create_table(doc, excel_path, sh, placeholder_dict = placeholder_dict)
-#   }
-# }
-
 
 # ---- LISTINGS ----
 listing_sheets <- sheets[grepl(CONST$REGEX$listing_sheets, sheets, ignore.case = TRUE)]
-
 if (length(listing_sheets)) {
   doc <- add_section_cover_page(doc, "Listings")
   
-  first_listing <- TRUE
-  for (sh in listing_sheets) {
-    if (!first_listing) doc <- force_page_break(doc)
-    first_listing <- FALSE
-    
+  for (i in seq_along(listing_sheets)) {
+    sh <- listing_sheets[[i]]
+    if (i > 1) doc <- force_page_break(doc)
     doc <- read_and_create_table(doc, excel_path, sh, placeholder_dict = placeholder_dict)
   }
 }
-
 
 # ---- Write output ----
 timestamp <- format(Sys.time(), "%Y-%m-%d_%H-%M-%S")
@@ -1702,4 +1291,7 @@ safe_write_docx(doc, out_file)
 message("DONE: wrote ", normalizePath(out_file, winslash = "/", mustWork = TRUE))
 message("Size (bytes): ", file.info(out_file)$size)
 
+# Open (Windows only); harmless elsewhere
 try(shell.exec(normalizePath(out_file, winslash = "\\", mustWork = TRUE)), silent = TRUE)
+
+
